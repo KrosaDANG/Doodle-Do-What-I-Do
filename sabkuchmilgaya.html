@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="UTF-8"/>
+ <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+ <title>GESTURE</title>
+ <style>
+   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+   html,body{width:100%;height:100%;overflow:hidden;background:#ede7d5}
+   canvas{display:block;position:fixed;top:0;left:0;z-index:0}
+   #loader{
+     position:fixed;inset:0;display:flex;flex-direction:column;
+     align-items:center;justify-content:center;
+     background:#ede7d5;color:rgba(70,55,40,0.8);
+     font-family:monospace;font-size:13px;letter-spacing:.18em;
+     text-transform:uppercase;z-index:10;pointer-events:none;
+     transition:opacity 1.2s ease;
+   }
+   #loader.hidden{opacity:0;pointer-events:none}
+   .ldots{display:flex;gap:10px;margin-top:18px}
+   .ldot{width:9px;height:9px;border-radius:50%;background:#e07040;
+         animation:ldpulse 1.2s ease-in-out infinite}
+   .ldot:nth-child(2){animation-delay:.2s;background:#4090c0}
+   .ldot:nth-child(3){animation-delay:.4s;background:#60b080}
+   @keyframes ldpulse{
+     0%,100%{opacity:.2;transform:scale(.7)}
+     50%{opacity:1;transform:scale(1.3)}
+   }
+   #inputVideo{
+     position:fixed;width:1px;height:1px;top:0;left:0;
+     opacity:0;pointer-events:none;
+   }
+   #errbox{
+     display:none;position:fixed;bottom:10px;left:10px;right:10px;
+     background:rgba(200,0,0,.9);color:#fff;font-family:monospace;
+     font-size:12px;padding:10px;border-radius:4px;z-index:20;
+     white-space:pre-wrap;max-height:150px;overflow:auto;
+   }
+ </style>
+</head>
+<body>
+
+
+<div id="loader">
+ <span id="loaderText">Awakening — loading…</span>
+ <div class="ldots">
+   <div class="ldot"></div>
+   <div class="ldot"></div>
+   <div class="ldot"></div>
+ </div>
+</div>
+
+
+<video id="inputVideo" playsinline autoplay muted></video>
+<div id="errbox"></div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+    SCRIPT LOADING ORDER — do not change
+    1. p5.js core
+    2. p5.sound (must come after p5 core)
+    3. MediaPipe libraries
+    4. gestureReactions.js  ← NEW: environmental reaction layer
+       Must load BEFORE gesture.js so the object exists when
+       gesture.js calls gestureReactionSystem.update() etc.
+       Safe to remove — gesture.js guards every call with typeof check.
+    5. gesture.js  ← THE ONLY sketch file. Unchanged except 3 hook calls.
+    6. MediaPipe init (inline — runs after gesture.js is parsed)
+    ═══════════════════════════════════════════════════════════════ -->
+
+
+<!-- 1 + 2: p5 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/addons/p5.sound.min.js"></script>
+
+
+<!-- 3: MediaPipe -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"  crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"                crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"                  crossorigin="anonymous"></script>
+
+
+<!-- Global error display — must be before sketch files -->
+<script>
+ const errBox = document.getElementById("errbox");
+ window.addEventListener("error", e => {
+   errBox.style.display = "block";
+   errBox.textContent += "ERROR: " + e.message + " (line " + e.lineno + ")\n";
+ }, true);
+
+
+ // ── Global MediaPipe result stores — read by gesture.js each frame ──
+ // mpFaces: array of landmark arrays (one per detected face)
+ // mpHands: array of { landmarks, handedness:"Left"|"Right" }
+ // mpPose:  result object with poseLandmarks, or null
+ window.mpFaces = [];
+ window.mpHands = [];
+ window.mpPose  = null;
+</script>
+
+
+<!-- 4: Main sketch FIRST -->
+<script src="burst-gesture.js"></script>
+
+
+<!-- 5: Reaction system AFTER -->
+<script src="burst-reaction.js"></script>
+
+
+
+
+<!-- 6: MediaPipe initialisation — runs after gesture.js is ready -->
+<script>
+(function(){
+ const loaderText = document.getElementById("loaderText");
+ const loader     = document.getElementById("loader");
+ let loaderGone   = false;
+ let faceReady    = false;
+
+
+ function hideLoader(){
+   if(loaderGone) return;
+   loaderGone = true;
+   loader.classList.add("hidden");
+   setTimeout(()=>{ if(loader.parentNode) loader.parentNode.removeChild(loader); }, 1600);
+ }
+
+
+ const videoEl = document.getElementById("inputVideo");
+
+
+ // ── FaceMesh ────────────────────────────────────────────────────
+ const faceMesh = new FaceMesh({
+   locateFile: f => "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/" + f
+ });
+ faceMesh.setOptions({
+   maxNumFaces: 1,
+   refineLandmarks: true,
+   minDetectionConfidence: 0.5,
+   minTrackingConfidence: 0.5
+ });
+ faceMesh.onResults(results => {
+   window.mpFaces = results.multiFaceLandmarks || [];
+   if(!faceReady){
+     faceReady = true;
+     loaderText.textContent = "Ready — step into view!";
+     setTimeout(hideLoader, 800);
+   }
+ });
+
+
+ // ── Hands ────────────────────────────────────────────────────────
+ const hands = new Hands({
+   locateFile: f => "https://cdn.jsdelivr.net/npm/@mediapipe/hands/" + f
+ });
+ hands.setOptions({
+   maxNumHands: 2,
+   modelComplexity: 1,
+   minDetectionConfidence: 0.6,
+   minTrackingConfidence: 0.5
+ });
+ hands.onResults(results => {
+   const out = [];
+   if(results.multiHandLandmarks && results.multiHandedness){
+     for(let i = 0; i < results.multiHandLandmarks.length; i++){
+       out.push({
+         landmarks:  results.multiHandLandmarks[i],
+         handedness: results.multiHandedness[i]?.label || "Left"
+       });
+     }
+   }
+   window.mpHands = out;
+ });
+
+
+ // ── Pose ─────────────────────────────────────────────────────────
+ const pose = new Pose({
+   locateFile: f => "https://cdn.jsdelivr.net/npm/@mediapipe/pose/" + f
+ });
+ pose.setOptions({
+   modelComplexity: 1,
+   smoothLandmarks: true,
+   enableSegmentation: false,
+   minDetectionConfidence: 0.5,
+   minTrackingConfidence: 0.5
+ });
+ pose.onResults(results => {
+   window.mpPose = results.poseLandmarks ? results : null;
+ });
+
+
+ // ── Camera — single feed → FaceMesh + Hands + Pose ──────────────
+ new Camera(videoEl, {
+   onFrame: async () => {
+     try{ await faceMesh.send({ image: videoEl }); } catch(e){}
+     try{ await hands.send({    image: videoEl }); } catch(e){}
+     try{ await pose.send({     image: videoEl }); } catch(e){}
+   },
+   width: 640, height: 480
+ }).start()
+   .then(()  => console.log("Camera OK"))
+   .catch(err => {
+     errBox.style.display = "block";
+     errBox.textContent =
+       "CAMERA BLOCKED: " + err.message +
+       "\nAllow camera access and reload.";
+     loaderText.textContent = "⚠ Allow camera and reload";
+   });
+
+
+ // Safety fallback: hide loader after 12 s even if face never detected
+ setTimeout(hideLoader, 12000);
+})();
+</script>
+</body>
+</html>
