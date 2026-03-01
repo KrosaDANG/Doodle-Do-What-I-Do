@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Ultimate AR Mashup</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3"></script>
+  <style>
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #fff; }
+    #output_canvas { width: 100vw; height: 100vh; object-fit: cover; transform: scaleX(-1); }
+    #status { 
+      position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+      color: #333; font-family: sans-serif; z-index: 100; 
+      background: rgba(255,255,255,0.9); padding: 10px 20px; border-radius: 20px;
+    }
+    #startBtn {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      padding: 20px 40px; font-size: 22px; cursor: pointer; z-index: 1000;
+      border-radius: 50px; border: none; background: #6BCB77; color: white;
+    }
+  </style>
+</head>
+<body>
+
+  <button id="startBtn">Start AR Experience</button>
+  <div id="status">Waiting for camera...</div>
+  <video id="webcam" style="display:none" autoplay playsinline></video>
+  <canvas id="output_canvas"></canvas>
+
+  <script type="module">
+    import { HandLandmarker, FaceLandmarker, PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+    const video = document.getElementById("webcam");
+    const canvasElement = document.getElementById("output_canvas");
+    const canvasCtx = canvasElement.getContext("2d");
+    const statusDiv = document.getElementById("status");
+    const startBtn = document.getElementById("startBtn");
+
+    // --- AUDIO ASSETS ---
+    const romanticAudio = new Audio("romantic meme.mp3");
+    const wowAudio = new Audio("wow meme.mp3");
+    const yayAudio = new Audio("YAY Kids (Celebration) Sound Effect [Free Download].mp3");
+    
+    romanticAudio.loop = true;
+    yayAudio.loop = true;
+
+    let audioStarted = false;
+    let isWowPlaying = false;
+
+    // --- STATE ---
+    let handLandmarker, faceLandmarker, poseLandmarker;
+    let isReady = false;
+    let lastVideoTime = -1;
+    let particles = [];
+    let heartTransition = 0;
+    let surpriseTransition = 0;
+    let lastHandPos = [ {x:0,y:0}, {x:0,y:0} ];
+    const colors = ["#FF6B6B", "#FFD93D", "#6BCB77", "#4D96FF", "#FF9248", "#9B59B6"];
+
+    // --- PARTICLE LOGIC (From Palm Blast) ---
+    class Particle {
+      constructor(w, h, x, y, isBlast = false) {
+        this.isBlast = isBlast;
+        this.x = x !== undefined ? x : Math.random() * w;
+        this.y = y !== undefined ? y : -50;
+        this.size = Math.random() * 12 + 8;
+        this.color = colors[Math.floor(Math.random() * colors.length)];
+        this.angle = Math.random() * 360;
+        this.spin = (Math.random() - 0.5) * 10;
+        this.opacity = 1.0;
+        this.phase = Math.random() * Math.PI * 2;
+        this.wobbleSpeed = Math.random() * 0.12 + 0.05;
+        this.ribbonWidth = Math.random() * 4 + 2;
+
+        if (this.isBlast) {
+          const a = Math.random() * Math.PI * 2;
+          const f = Math.random() * 15 + 5;
+          this.vx = Math.cos(a) * f;
+          this.vy = Math.sin(a) * f;
+        } else {
+          this.vx = (Math.random() - 0.5) * 3;
+          this.vy = Math.random() * 3 + 4;
+        }
+      }
+      update(w, h) {
+        this.x += this.vx; this.y += this.vy;
+        if (this.isBlast) { this.vy += 0.35; this.vx *= 0.94; this.opacity -= 0.02; }
+        else { this.vy += 0.1; this.opacity -= 0.005; }
+        this.phase += this.wobbleSpeed; this.angle += this.spin;
+        return !(this.y > h + 50 || this.opacity <= 0);
+      }
+      draw(ctx) {
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, this.opacity);
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle * Math.PI / 180);
+        const stretch = Math.sin(this.phase) * this.size;
+        ctx.beginPath();
+        ctx.moveTo(-this.ribbonWidth/2, -this.size);
+        ctx.quadraticCurveTo(stretch, 0, -this.ribbonWidth/2, this.size);
+        ctx.lineWidth = this.ribbonWidth; ctx.strokeStyle = this.color;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // --- VISUAL DRAWING (From Heart/Surprise) ---
+    function drawHeartTunnel(ctx, w, h) {
+      const time = performance.now() * 0.005;
+      for (let i = 12; i > 0; i--) {
+        const size = ((i * 200 + time * 300) % 2500);
+        ctx.globalAlpha = (1 - (size / 2500)) * heartTransition;
+        ctx.fillStyle = i % 2 === 0 ? "#FFB5C0" : "#E75480";
+        ctx.beginPath();
+        let centerY = (h / 2) - (size * 0.25);
+        ctx.moveTo(w/2, centerY + size / 4);
+        ctx.bezierCurveTo(w/2, centerY, w/2 - size / 2, centerY, w/2 - size / 2, centerY + size / 4);
+        ctx.bezierCurveTo(w/2 - size / 2, centerY + size / 2, w/2, centerY + size * 0.75, w/2, centerY + size);
+        ctx.bezierCurveTo(w/2, centerY + size * 0.75, w/2 + size / 2, centerY + size / 2, w/2 + size / 2, centerY + size / 4);
+        ctx.bezierCurveTo(w/2 + size / 2, centerY, w/2, centerY, w/2, centerY + size / 4);
+        ctx.fill();
+      }
+    }
+
+    function drawSurpriseBurst(ctx, w, h) {
+      ctx.save();
+      const shakeX = (Math.random() - 0.5) * 15 * surpriseTransition;
+      const shakeY = (Math.random() - 0.5) * 15 * surpriseTransition;
+      ctx.translate(w / 2 + shakeX, h / 2 + shakeY);
+      ctx.scale(surpriseTransition, surpriseTransition);
+      const spikes = 20;
+      const outerRadius = Math.max(w, h) * 1.2;
+      const innerRadius = outerRadius * 0.4;
+      ctx.fillStyle = "#FFD700"; ctx.strokeStyle = "#FF4500"; ctx.lineWidth = 20;
+      ctx.beginPath();
+      for (let i = 0; i < spikes * 2; i++) {
+        const radius = i % 2 === 0 ? outerRadius : innerRadius;
+        const angle = (Math.PI / spikes) * i;
+        ctx.lineTo(Math.cos(angle) * radius, Math.sin(angle) * radius);
+      }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+
+    // --- INITIALIZATION ---
+    async function initAI() {
+      const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+      const common = { baseOptions: { delegate: "GPU" }, runningMode: "VIDEO" };
+      handLandmarker = await HandLandmarker.createFromOptions(vision, { ...common, baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task` }, numHands: 2 });
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, { ...common, baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task` }, outputFaceBlendshapes: true });
+      poseLandmarker = await PoseLandmarker.createFromOptions(vision, { ...common, baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task` } });
+      isReady = true;
+      statusDiv.innerHTML = "Ready! Show your gestures.";
+    }
+
+    startBtn.addEventListener('click', () => {
+      romanticAudio.play(); romanticAudio.volume = 0;
+      yayAudio.play(); yayAudio.volume = 0;
+      audioStarted = true;
+      startBtn.style.display = "none";
+      navigator.mediaDevices.getUserMedia({ video: true }).then(s => {
+        video.srcObject = s;
+        video.onloadeddata = () => { initAI(); predict(); };
+      });
+    });
+
+    async function predict() {
+      if (isReady && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        canvasElement.width = video.videoWidth;
+        canvasElement.height = video.videoHeight;
+        
+        const timestamp = performance.now();
+        const handRes = handLandmarker.detectForVideo(video, timestamp);
+        const faceRes = faceLandmarker.detectForVideo(video, timestamp);
+        const poseRes = poseLandmarker.detectForVideo(video, timestamp);
+
+        let isHeart = false;
+        let isSurprised = false;
+        let activePalm = false;
+
+        // 1. Hand / Palm / Confetti logic
+        if (handRes.landmarks) {
+          handRes.landmarks.forEach((lm, i) => {
+            // Palm check
+            const isUpright = lm[8].y < lm[5].y && lm[12].y < lm[9].y;
+            const isForward = lm[9].z < lm[0].z;
+            const dist = Math.hypot(lm[9].x - (lastHandPos[i]?.x || 0), lm[9].y - (lastHandPos[i]?.y || 0));
+            
+            if (isUpright && isForward && dist > 0.02) {
+              activePalm = true;
+              const px = (1 - lm[9].x) * canvasElement.width; // Flip for mirrored canvas
+              const py = lm[9].y * canvasElement.height;
+              for(let b=0; b<5; b++) particles.push(new Particle(canvasElement.width, canvasElement.height, px, py, true));
+            }
+            lastHandPos[i] = {x: lm[9].x, y: lm[9].y};
+          });
+        }
+
+        // 2. Heart and Fixed Surprise logic
+        if (faceRes.faceLandmarks?.[0]) {
+          const face = faceRes.faceLandmarks[0];
+          const jawOpen = faceRes.faceBlendshapes[0].categories.find(c => c.categoryName === "jawOpen").score > 0.4;
+          
+          if (handRes.landmarks?.length >= 2) {
+            const h1 = handRes.landmarks[0][8]; const h2 = handRes.landmarks[1][8];
+            
+            // Heart Check
+            if (h1.y < face[10].y && Math.hypot(h1.x - h2.x, h1.y - h2.y) < 0.2) isHeart = true;
+
+            // FIX: Surprise Check (Checks both hands against both cheeks)
+            const hand1NearCheek = Math.hypot(h1.x - face[123].x, h1.y - face[123].y) < 0.2 || Math.hypot(h1.x - face[352].x, h1.y - face[352].y) < 0.2;
+            const hand2NearCheek = Math.hypot(h2.x - face[123].x, h2.y - face[123].y) < 0.2 || Math.hypot(h2.x - face[352].x, h2.y - face[352].y) < 0.2;
+            if (jawOpen && hand1NearCheek && hand2NearCheek) isSurprised = true;
+          }
+        }
+
+        // --- AUDIO FADES ---
+        if (audioStarted) {
+          heartTransition += (isHeart ? 0.05 : -0.05);
+          heartTransition = Math.max(0, Math.min(1, heartTransition));
+          romanticAudio.volume = heartTransition * 0.8;
+
+          surpriseTransition += (isSurprised ? 0.2 : -0.1);
+          surpriseTransition = Math.max(0, Math.min(1, surpriseTransition));
+          if (isSurprised && !isWowPlaying) { wowAudio.currentTime = 0; wowAudio.play(); isWowPlaying = true; }
+          else if (!isSurprised) isWowPlaying = false;
+
+          const targetYay = activePalm ? 0.7 : 0;
+          yayAudio.volume += (targetYay - yayAudio.volume) * 0.1;
+        }
+
+        // --- RENDER ---
+        canvasCtx.fillStyle = "white";
+        canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+        if (heartTransition > 0) drawHeartTunnel(canvasCtx, canvasElement.width, canvasElement.height);
+        if (surpriseTransition > 0) drawSurpriseBurst(canvasCtx, canvasElement.width, canvasElement.height);
+
+        particles = particles.filter(p => {
+          const alive = p.update(canvasElement.width, canvasElement.height);
+          if (alive) p.draw(canvasCtx);
+          return alive;
+        });
+      }
+      requestAnimationFrame(predict);
+    }
+  </script>
+</body>
+</html>
